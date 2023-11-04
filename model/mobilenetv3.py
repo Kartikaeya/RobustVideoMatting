@@ -45,6 +45,8 @@ class MobileNetV3LargeEncoder(MobileNetV3):
             pretrained_state_dict = torch.hub.load_state_dict_from_url(
                 'https://download.pytorch.org/models/mobilenet_v3_large-8738ca79.pth')
             
+            # pretrained_state_dict = torch.load("./../mobilenet_v3_large-8738ca79.pth")
+
             # print("pretrained_state_dict keys \n \n ", pretrained_state_dict.keys())
             
             # print("\n\ncurrent model state dict keys \n\n", self.state_dict().keys())
