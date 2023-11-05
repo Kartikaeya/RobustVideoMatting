@@ -94,6 +94,9 @@ from torchvision.utils import make_grid
 from torchvision.transforms.functional import center_crop
 from tqdm import tqdm
 
+import warnings 
+warnings.filterwarnings("ignore")
+
 from dataset.videomatte import (
     VideoMatteDataset,
     VideoMatteTrainAugmentation,
@@ -152,7 +155,7 @@ class Trainer:
         parser.add_argument('--seq-length-lr', type=int, required=True)
         parser.add_argument('--seq-length-hr', type=int, default=6)
         parser.add_argument('--downsample-ratio', type=float, default=0.25)
-        parser.add_argument('--batch-size-per-gpu', type=int, default=1)
+        parser.add_argument('--batch-size-per-gpu', type=int, default=2)
         parser.add_argument('--num-workers', type=int, default=8)
         parser.add_argument('--epoch-start', type=int, default=0)
         parser.add_argument('--epoch-end', type=int, default=16)
@@ -190,7 +193,6 @@ class Trainer:
         if self.args.dataset == 'videomatte':
             self.dataset_lr_train = VideoMatteDataset(
                 videomatte_dir=DATA_PATHS['videomatte']['train'],
-                # background_image_dir=DATA_PATHS['background_images']['train'],
                 background_video_dir=DATA_PATHS['background_videos']['train'],
                 size=self.args.resolution_lr,
                 seq_length=self.args.seq_length_lr,
@@ -199,7 +201,6 @@ class Trainer:
             if self.args.train_hr:
                 self.dataset_hr_train = VideoMatteDataset(
                     videomatte_dir=DATA_PATHS['videomatte']['train'],
-                    # background_image_dir=DATA_PATHS['background_images']['train'],
                     background_video_dir=DATA_PATHS['background_videos']['train'],
                     size=self.args.resolution_hr,
                     seq_length=self.args.seq_length_hr,
@@ -207,38 +208,11 @@ class Trainer:
                     transform=VideoMatteTrainAugmentation(size_hr))
             self.dataset_valid = VideoMatteDataset(
                 videomatte_dir=DATA_PATHS['videomatte']['valid'],
-                # background_image_dir=DATA_PATHS['background_images']['valid'],
                 background_video_dir=DATA_PATHS['background_videos']['valid'],
                 size=self.args.resolution_hr if self.args.train_hr else self.args.resolution_lr,
                 seq_length=self.args.seq_length_hr if self.args.train_hr else self.args.seq_length_lr,
                 seq_sampler=ValidFrameSampler(),
                 transform=VideoMatteValidAugmentation(size_hr if self.args.train_hr else size_lr))
-        # else:
-        #     self.dataset_lr_train = ImageMatteDataset(
-        #         imagematte_dir=DATA_PATHS['imagematte']['train'],
-        #         background_image_dir=DATA_PATHS['background_images']['train'],
-        #         background_video_dir=DATA_PATHS['background_videos']['train'],
-        #         size=self.args.resolution_lr,
-        #         seq_length=self.args.seq_length_lr,
-        #         seq_sampler=TrainFrameSampler(),
-        #         transform=ImageMatteAugmentation(size_lr))
-        #     if self.args.train_hr:
-        #         self.dataset_hr_train = ImageMatteDataset(
-        #             imagematte_dir=DATA_PATHS['imagematte']['train'],
-        #             background_image_dir=DATA_PATHS['background_images']['train'],
-        #             background_video_dir=DATA_PATHS['background_videos']['train'],
-        #             size=self.args.resolution_hr,
-        #             seq_length=self.args.seq_length_hr,
-        #             seq_sampler=TrainFrameSampler(),
-        #             transform=ImageMatteAugmentation(size_hr))
-        #     self.dataset_valid = ImageMatteDataset(
-        #         imagematte_dir=DATA_PATHS['imagematte']['valid'],
-        #         background_image_dir=DATA_PATHS['background_images']['valid'],
-        #         background_video_dir=DATA_PATHS['background_videos']['valid'],
-        #         size=self.args.resolution_hr if self.args.train_hr else self.args.resolution_lr,
-        #         seq_length=self.args.seq_length_hr if self.args.train_hr else self.args.seq_length_lr,
-        #         seq_sampler=ValidFrameSampler(),
-        #         transform=ImageMatteAugmentation(size_hr if self.args.train_hr else size_lr))
             
         # Matting dataloaders:
         self.datasampler_lr_train = DistributedSampler(
@@ -269,51 +243,6 @@ class Trainer:
             batch_size=self.args.batch_size_per_gpu,
             num_workers=self.args.num_workers,
             pin_memory=True)
-        
-        # Segementation datasets
-        # self.log('Initializing image segmentation datasets')
-        # self.dataset_seg_image = ConcatDataset([
-        #     CocoPanopticDataset(
-        #         imgdir=DATA_PATHS['coco_panoptic']['imgdir'],
-        #         anndir=DATA_PATHS['coco_panoptic']['anndir'],
-        #         annfile=DATA_PATHS['coco_panoptic']['annfile'],
-        #         transform=CocoPanopticTrainAugmentation(size_lr)),
-        #     SuperviselyPersonDataset(
-        #         imgdir=DATA_PATHS['spd']['imgdir'],
-        #         segdir=DATA_PATHS['spd']['segdir'],
-        #         transform=CocoPanopticTrainAugmentation(size_lr))
-        # ])
-        # self.datasampler_seg_image = DistributedSampler(
-        #     dataset=self.dataset_seg_image,
-        #     rank=self.rank,
-        #     num_replicas=self.world_size,
-        #     shuffle=True)
-        # self.dataloader_seg_image = DataLoader(
-        #     dataset=self.dataset_seg_image,
-        #     batch_size=self.args.batch_size_per_gpu * self.args.seq_length_lr,
-        #     num_workers=self.args.num_workers,
-        #     sampler=self.datasampler_seg_image,
-        #     pin_memory=True)
-        
-        # self.log('Initializing video segmentation datasets')
-        # self.dataset_seg_video = YouTubeVISDataset(
-        #     videodir=DATA_PATHS['youtubevis']['videodir'],
-        #     annfile=DATA_PATHS['youtubevis']['annfile'],
-        #     size=self.args.resolution_lr,
-        #     seq_length=self.args.seq_length_lr,
-        #     seq_sampler=TrainFrameSampler(speed=[1]),
-        #     transform=YouTubeVISAugmentation(size_lr))
-        # self.datasampler_seg_video = DistributedSampler(
-        #     dataset=self.dataset_seg_video,
-        #     rank=self.rank,
-        #     num_replicas=self.world_size,
-        #     shuffle=True)
-        # self.dataloader_seg_video = DataLoader(
-        #     dataset=self.dataset_seg_video,
-        #     batch_size=self.args.batch_size_per_gpu,
-        #     num_workers=self.args.num_workers,
-        #     sampler=self.datasampler_seg_video,
-        #     pin_memory=True)
         
     def init_model(self):
         self.log('Initializing model')
@@ -358,15 +287,6 @@ class Trainer:
                 if self.args.train_hr:
                     true_fgr, true_pha, true_bgr = self.load_next_mat_hr_sample()
                     self.train_mat(true_fgr, true_pha, true_bgr, downsample_ratio=self.args.downsample_ratio, tag='hr')
-                
-                # Segmentation pass
-                # if self.step % 2 == 0:
-                #     true_img, true_seg = self.load_next_seg_video_sample()
-                #     self.train_seg(true_img, true_seg, log_label='seg_video')
-                # else:
-                #     true_img, true_seg = self.load_next_seg_image_sample()
-                #     self.train_seg(true_img.unsqueeze(1), true_seg.unsqueeze(1), log_label='seg_image')
-                    
                 if self.step % self.args.checkpoint_save_interval == 0:
                     self.save()
                     
@@ -376,7 +296,7 @@ class Trainer:
         true_fgr = true_fgr.to(self.rank, non_blocking=True)
         true_pha = true_pha.to(self.rank, non_blocking=True)
         true_bgr = true_bgr.to(self.rank, non_blocking=True)
-        true_fgr, true_pha, true_bgr = self.random_crop(true_fgr, true_pha, true_bgr)
+        true_fgr, true_pha, true_bgr = self.random_crop(1//downsample_ratio, true_fgr, true_pha, true_bgr)
         
         true_src = true_bgr.clone()
         
@@ -417,18 +337,38 @@ class Trainer:
         fg_bg_input = torch.cat((true_src, true_bgr), dim = -3)
 
         with autocast(enabled=not self.args.disable_mixed_precision):
-            pred_fgr, pred_pha = self.model_ddp(fg_bg_input, downsample_ratio=downsample_ratio)[:2]
-            loss = matting_loss(pred_fgr, pred_pha, true_fgr, true_pha)
+            pred_pha_sm, pred_fgr_sm, pred_err_sm, pred_pha_lg, pred_fgr_lg = self.model_ddp(fg_bg_input, downsample_ratio=downsample_ratio)[:5]
 
-        self.scaler.scale(loss['total']).backward()
+            if tag == 'lr':
+                loss_hr = dict()
+                loss_hr['total'] = 0.0
+                loss_lr = matting_loss(pred_fgr_sm, pred_pha_sm, true_fgr, true_pha, pred_err_sm)
+            else:
+                true_fgr_sm = kornia.geometry.transform.resize(true_fgr, pred_fgr_sm.shape[3:])
+                true_pha_sm = kornia.geometry.transform.resize(true_pha, pred_pha_sm.shape[3:])
+
+                loss_lr = matting_loss(pred_fgr_sm, pred_pha_sm, true_fgr_sm, true_pha_sm, pred_err_sm)             
+                loss_hr = matting_loss(pred_fgr_lg, pred_pha_lg, true_fgr, true_pha)
+        
+        self.scaler.scale(loss_lr['total'] + loss_hr['total']).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()
         
         if self.rank == 0 and self.step % self.args.log_train_loss_interval == 0:
-            for loss_name, loss_value in loss.items():
-                self.writer.add_scalar(f'train_{tag}_{loss_name}', loss_value, self.step)
             
+            for loss_name, loss_value in loss_lr.items():
+                self.writer.add_scalar(f'train_{tag}_{loss_name}', loss_value, self.step)
+            if tag == 'hr':
+                for loss_name, loss_value in loss_hr.items():
+                    self.writer.add_scalar(f'train_{tag}_{loss_name}', loss_value, self.step)
+                    self.writer.add_scalar('total loss lr + hr', loss_lr['total'] + loss_hr['total'], self.step)
+        if tag == 'lr':
+            pred_pha = pred_pha_sm
+            pred_fgr = pred_fgr_sm
+        else:
+            pred_pha = pred_pha_lg
+            pred_fgr = pred_fgr_lg    
         if self.rank == 0 and self.step % self.args.log_train_images_interval == 0:
             self.writer.add_image(f'train_{tag}_pred_fgr', make_grid(pred_fgr.flatten(0, 1), nrow=pred_fgr.size(1)), self.step)
             self.writer.add_image(f'train_{tag}_pred_pha', make_grid(pred_pha.flatten(0, 1), nrow=pred_pha.size(1)), self.step)
@@ -436,29 +376,6 @@ class Trainer:
             self.writer.add_image(f'train_{tag}_true_pha', make_grid(true_pha.flatten(0, 1), nrow=true_pha.size(1)), self.step)
             self.writer.add_image(f'train_{tag}_true_src', make_grid(true_src.flatten(0, 1), nrow=true_src.size(1)), self.step)
     
-    # does not get called    
-    # def train_seg(self, true_img, true_seg, log_label):
-    #     true_img = true_img.to(self.rank, non_blocking=True)
-    #     true_seg = true_seg.to(self.rank, non_blocking=True)
-        
-    #     true_img, true_seg = self.random_crop(true_img, true_seg)
-        
-    #     with autocast(enabled=not self.args.disable_mixed_precision):
-    #         pred_seg = self.model_ddp(true_img, segmentation_pass=True)[0]
-    #         loss = segmentation_loss(pred_seg, true_seg)
-        
-    #     self.scaler.scale(loss).backward()
-    #     self.scaler.step(self.optimizer)
-    #     self.scaler.update()
-    #     self.optimizer.zero_grad()
-        
-    #     if self.rank == 0 and (self.step - self.step % 2) % self.args.log_train_loss_interval == 0:
-    #         self.writer.add_scalar(f'{log_label}_loss', loss, self.step)
-        
-    #     if self.rank == 0 and (self.step - self.step % 2) % self.args.log_train_images_interval == 0:
-    #         self.writer.add_image(f'{log_label}_pred_seg', make_grid(pred_seg.flatten(0, 1).float().sigmoid(), nrow=self.args.seq_length_lr), self.step)
-    #         self.writer.add_image(f'{log_label}_true_seg', make_grid(true_seg.flatten(0, 1), nrow=self.args.seq_length_lr), self.step)
-    #         self.writer.add_image(f'{log_label}_true_img', make_grid(true_img.flatten(0, 1), nrow=self.args.seq_length_lr), self.step)
     
     def load_next_mat_hr_sample(self):
         try:
@@ -469,23 +386,6 @@ class Trainer:
             sample = next(self.dataiterator_mat_hr)
         return sample
     
-    # def load_next_seg_video_sample(self):
-    #     try:
-    #         sample = next(self.dataiterator_seg_video)
-    #     except:
-    #         self.datasampler_seg_video.set_epoch(self.datasampler_seg_video.epoch + 1)
-    #         self.dataiterator_seg_video = iter(self.dataloader_seg_video)
-    #         sample = next(self.dataiterator_seg_video)
-    #     return sample
-    
-    # def load_next_seg_image_sample(self):
-    #     try:
-    #         sample = next(self.dataiterator_seg_image)
-    #     except:
-    #         self.datasampler_seg_image.set_epoch(self.datasampler_seg_image.epoch + 1)
-    #         self.dataiterator_seg_image = iter(self.dataloader_seg_image)
-    #         sample = next(self.dataiterator_seg_image)
-    #     return sample
     
     def validate(self):
         if self.rank == 0:
@@ -502,8 +402,8 @@ class Trainer:
                         batch_size = true_src.size(0)
 
                         fg_bg_input = torch.cat((true_src, true_bgr), dim = -3)
-                        pred_fgr, pred_pha = self.model(fg_bg_input)[:2]
-                        total_loss += matting_loss(pred_fgr, pred_pha, true_fgr, true_pha)['total'].item() * batch_size
+                        pred_fgr, pred_pha, pred_err = self.model(fg_bg_input)[:3]
+                        total_loss += matting_loss(pred_fgr, pred_pha, pred_err, true_fgr, true_pha)['total'].item() * batch_size
                         total_count += batch_size
             avg_loss = total_loss / total_count
             self.log(f'Validation set average loss: {avg_loss}')
@@ -511,10 +411,10 @@ class Trainer:
             self.model_ddp.train()
         dist.barrier()
     
-    def random_crop(self, *imgs):
+    def random_crop(self, divisibility_factor, *imgs):
         h, w = imgs[0].shape[-2:]
-        w = random.choice(range(w // 2, w))
-        h = random.choice(range(h // 2, h))
+        w = int(random.choice(range(w // 2, w)) // divisibility_factor * divisibility_factor)
+        h = int(random.choice(range(h // 2, h)) // divisibility_factor * divisibility_factor)
         results = []
         for img in imgs:
             B, T = img.shape[:2]

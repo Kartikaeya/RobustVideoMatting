@@ -4,7 +4,7 @@ from torch.nn import functional as F
 # --------------------------------------------------------------------------------- Train Loss
 
 
-def matting_loss(pred_fgr, pred_pha, true_fgr, true_pha):
+def matting_loss(pred_fgr, pred_pha, true_fgr, true_pha, pred_err = None):
     """
     Args:
         pred_fgr: Shape(B, T, 3, H, W)
@@ -25,9 +25,15 @@ def matting_loss(pred_fgr, pred_pha, true_fgr, true_pha):
     loss['fgr_l1'] = F.l1_loss(pred_fgr, true_fgr)
     loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
                                        true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
+    loss['err_loss'] = 0
+    # loss on the error selection (from BGV2)
+    if pred_err != None:
+        true_err = torch.abs(pred_pha - true_pha)
+        loss['err_loss'] = F.mse_loss(pred_err, true_err)
+
     # Total
     loss['total'] = loss['pha_l1'] + loss['pha_coherence'] + loss['pha_laplacian'] \
-                  + loss['fgr_l1'] + loss['fgr_coherence']
+                  + loss['fgr_l1'] + loss['fgr_coherence'] + loss['err_loss']
     return loss
 
 def segmentation_loss(pred_seg, true_seg):

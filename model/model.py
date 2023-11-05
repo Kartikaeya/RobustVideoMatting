@@ -11,15 +11,15 @@ from .lraspp import LRASPP
 from .decoder import RecurrentDecoder, Projection
 from .fast_guided_filter import FastGuidedFilterRefiner
 from .deep_guided_filter import DeepGuidedFilterRefiner
-
+from .refiner import Refiner
 class MattingNetwork(nn.Module):
     def __init__(self,
                  variant: str = 'mobilenetv3',
-                 refiner: str = 'deep_guided_filter',
+                 refiner: str = 'patch_based',
                  pretrained_backbone: bool = False):
         super().__init__()
         assert variant in ['mobilenetv3', 'resnet50']
-        assert refiner in ['fast_guided_filter', 'deep_guided_filter']
+        assert refiner in ['fast_guided_filter', 'deep_guided_filter', 'patch_based']
         
         if variant == 'mobilenetv3':
             self.backbone = MobileNetV3LargeEncoder(pretrained_backbone)
@@ -30,11 +30,13 @@ class MattingNetwork(nn.Module):
             self.aspp = LRASPP(2048, 256)
             self.decoder = RecurrentDecoder([64, 256, 512, 256], [128, 64, 32, 16])
             
-        self.project_mat = Projection(16, 4)
+        self.project_mat = Projection(16, 5)
         self.project_seg = Projection(16, 1)
-
+        self.refiner_name = refiner
         if refiner == 'deep_guided_filter':
             self.refiner = DeepGuidedFilterRefiner()
+        elif refiner == 'patch_based':
+            self.refiner = Refiner(mode = "sampling", sample_pixels=80_000, threshold= 0.7, kernel_size=3)
         else:
             self.refiner = FastGuidedFilterRefiner()
         
@@ -57,13 +59,42 @@ class MattingNetwork(nn.Module):
         hid, *rec = self.decoder(src_sm, f1, f2, f3, f4, r1, r2, r3, r4)
         
         if not segmentation_pass:
-            fgr_residual, pha = self.project_mat(hid).split([3, 1], dim=-3)
+            fgr_residual_sm, pha_sm, err_sm = self.project_mat(hid).split([3, 1, 1], dim=-3)
+
+            pha_sm = pha_sm.clamp(0., 1.)
+            # fgr_residual_sm = fgr_residual_sm
+            err_sm = err_sm.clamp(0.,1.)
+            hid_sm = hid.relu()
+
+            fgr_residual_lg = None
+            fgr_lg = None
+            pha_lg = None
+
+            # refine matting pass here
             if downsample_ratio != 1:
-                fgr_residual, pha = self.refiner(src[:, :, :3, ...], src_sm[:, :, :3, ...], fgr_residual, pha, hid)
-            fgr = fgr_residual + src[:, :, :3, ...]
-            fgr = fgr.clamp(0., 1.)
-            pha = pha.clamp(0., 1.)
-            return [fgr, pha, *rec]
+
+                assert src.size(3) // 4 * 4 == src.size(3) and src.size(4) // 4 * 4 == src.size(4), \
+                    'src and bgr must have width and height that are divisible by 4'
+                
+                if self.refiner_name == "patch_based":
+                    B, T = src.shape[:2]
+
+                    fgr_residual_lg, pha_lg, _ = self.refiner(src.flatten(0, 1), pha_sm.flatten(0,1), fgr_residual_sm.flatten(0, 1), err_sm.flatten(0, 1), hid_sm.flatten(0, 1))
+                    
+                    fgr_residual_lg = fgr_residual_lg.unflatten(0, (B, T))
+                    pha_lg = pha_lg.unflatten(0, (B, T))
+                else:
+                    fgr_residual_lg, pha_lg = self.refiner(src[:, :, :3, ...], src_sm[:, :, :3, ...], fgr_residual_sm, pha_sm, hid)
+            
+            fgr_sm = fgr_residual_sm + src_sm[:, :, :3, ...]
+            fgr_sm = fgr_sm.clamp(0., 1.)
+
+            if fgr_residual_lg != None:
+                fgr_lg = fgr_residual_lg + src[:, :, :3, ...]
+                fgr_lg = fgr_lg.clamp(0., 1.)
+                pha_lg = pha_lg.clamp(0., 1.)
+
+            return [pha_sm, fgr_sm, err_sm, pha_lg, fgr_lg, *rec]
         else:
             seg = self.project_seg(hid)
             return [seg, *rec]
