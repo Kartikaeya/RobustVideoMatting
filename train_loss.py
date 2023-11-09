@@ -4,7 +4,7 @@ from torch.nn import functional as F
 # --------------------------------------------------------------------------------- Train Loss
 
 
-def matting_loss(pred_fgr, pred_pha, true_fgr, true_pha, pred_err = None):
+def matting_loss_sm(pred_fgr, pred_pha, true_fgr, true_pha, pred_err):
     """
     Args:
         pred_fgr: Shape(B, T, 3, H, W)
@@ -25,15 +25,40 @@ def matting_loss(pred_fgr, pred_pha, true_fgr, true_pha, pred_err = None):
     loss['fgr_l1'] = F.l1_loss(pred_fgr, true_fgr)
     loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
                                        true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
-    loss['err_loss'] = 0
+    
     # loss on the error selection (from BGV2)
-    if pred_err != None:
-        true_err = torch.abs(pred_pha - true_pha)
-        loss['err_loss'] = F.mse_loss(pred_err, true_err)
+    true_err = torch.abs(pred_pha.detach() - true_pha)
+    loss['err_loss'] = F.mse_loss(pred_err, true_err)
 
     # Total
     loss['total'] = loss['pha_l1'] + loss['pha_coherence'] + loss['pha_laplacian'] \
                   + loss['fgr_l1'] + loss['fgr_coherence'] + loss['err_loss']
+    return loss
+
+def matting_loss_lg(pred_fgr, pred_pha, true_fgr, true_pha):
+    """
+    Args:
+        pred_fgr: Shape(B, T, 3, H, W)
+        pred_pha: Shape(B, T, 1, H, W)
+        true_fgr: Shape(B, T, 3, H, W)
+        true_pha: Shape(B, T, 1, H, W)
+    """
+    loss = dict()
+    # Alpha losses
+    loss['pha_l1'] = F.l1_loss(pred_pha, true_pha)
+    loss['pha_laplacian'] = laplacian_loss(pred_pha.flatten(0, 1), true_pha.flatten(0, 1))
+    loss['pha_coherence'] = F.mse_loss(pred_pha[:, 1:] - pred_pha[:, :-1],
+                                       true_pha[:, 1:] - true_pha[:, :-1]) * 5
+    # Foreground losses
+    true_msk = true_pha.gt(0)
+    pred_fgr = pred_fgr * true_msk
+    true_fgr = true_fgr * true_msk
+    loss['fgr_l1'] = F.l1_loss(pred_fgr, true_fgr)
+    loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
+                                       true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
+    # Total
+    loss['total'] = loss['pha_l1'] + loss['pha_coherence'] + loss['pha_laplacian'] \
+                  + loss['fgr_l1'] + loss['fgr_coherence']
     return loss
 
 def segmentation_loss(pred_seg, true_seg):

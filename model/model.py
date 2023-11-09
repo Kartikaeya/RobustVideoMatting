@@ -1,7 +1,6 @@
 import torch
 from torch import Tensor
 from torch import nn
-from torchsummary import summary
 from torch.nn import functional as F
 from typing import Optional, List
 
@@ -12,6 +11,7 @@ from .decoder import RecurrentDecoder, Projection
 from .fast_guided_filter import FastGuidedFilterRefiner
 from .deep_guided_filter import DeepGuidedFilterRefiner
 from .refiner import Refiner
+
 class MattingNetwork(nn.Module):
     def __init__(self,
                  variant: str = 'mobilenetv3',
@@ -58,46 +58,41 @@ class MattingNetwork(nn.Module):
         f4 = self.aspp(f4)
         hid, *rec = self.decoder(src_sm, f1, f2, f3, f4, r1, r2, r3, r4)
         
-        if not segmentation_pass:
-            fgr_residual_sm, pha_sm, err_sm = self.project_mat(hid).split([3, 1, 1], dim=-3)
 
-            pha_sm = pha_sm.clamp(0., 1.)
-            # fgr_residual_sm = fgr_residual_sm
-            err_sm = err_sm.clamp(0.,1.)
-            hid_sm = hid.relu()
+        fgr_residual_sm, pha_sm, err_sm = self.project_mat(hid).split([3, 1, 1], dim=-3)
 
-            fgr_residual_lg = None
-            fgr_lg = None
-            pha_lg = None
+        pha_sm = pha_sm.clamp(0., 1.)
+        err_sm = err_sm.clamp(0., 1.)
+        hid_sm = hid.relu()
 
-            # refine matting pass here
-            if downsample_ratio != 1:
+        fgr_sm = fgr_residual_sm + src_sm[:, :, :3, ...]
+        fgr_sm = fgr_sm.clamp(0., 1.)
 
-                assert src.size(3) // 4 * 4 == src.size(3) and src.size(4) // 4 * 4 == src.size(4), \
-                    'src and bgr must have width and height that are divisible by 4'
-                
-                if self.refiner_name == "patch_based":
-                    B, T = src.shape[:2]
+        # refine matting pass here
+        if downsample_ratio != 1:
 
-                    fgr_residual_lg, pha_lg, _ = self.refiner(src.flatten(0, 1), pha_sm.flatten(0,1), fgr_residual_sm.flatten(0, 1), err_sm.flatten(0, 1), hid_sm.flatten(0, 1))
-                    
-                    fgr_residual_lg = fgr_residual_lg.unflatten(0, (B, T))
-                    pha_lg = pha_lg.unflatten(0, (B, T))
-                else:
-                    fgr_residual_lg, pha_lg = self.refiner(src[:, :, :3, ...], src_sm[:, :, :3, ...], fgr_residual_sm, pha_sm, hid)
+            assert src.size(3) // 4 * 4 == src.size(3) and src.size(4) // 4 * 4 == src.size(4), \
+                'src and bgr must have width and height that are divisible by 4'
             
-            fgr_sm = fgr_residual_sm + src_sm[:, :, :3, ...]
-            fgr_sm = fgr_sm.clamp(0., 1.)
+            if self.refiner_name == "patch_based":
+                B, T = src.shape[:2]
 
-            if fgr_residual_lg != None:
-                fgr_lg = fgr_residual_lg + src[:, :, :3, ...]
-                fgr_lg = fgr_lg.clamp(0., 1.)
-                pha_lg = pha_lg.clamp(0., 1.)
+                pha_lg, fgr_residual_lg, _ = self.refiner(src.flatten(0, 1), pha_sm.flatten(0, 1), fgr_residual_sm.flatten(0, 1), err_sm.flatten(0, 1), hid_sm.flatten(0, 1))
+                
+                fgr_residual_lg = fgr_residual_lg.unflatten(0, (B, T))
+                pha_lg = pha_lg.unflatten(0, (B, T))
+
+            else:
+                fgr_residual_lg, pha_lg, _ = self.refiner(src[:, :, :3, ...], src_sm[:, :, :3, ...], fgr_residual_sm, pha_sm, hid)
+
+            fgr_lg = fgr_residual_lg + src[:, :, :3, ...]
+            fgr_lg = fgr_lg.clamp(0., 1.)
+            pha_lg = pha_lg.clamp(0., 1.)
 
             return [pha_sm, fgr_sm, err_sm, pha_lg, fgr_lg, *rec]
-        else:
-            seg = self.project_seg(hid)
-            return [seg, *rec]
+        
+        return [pha_sm, fgr_sm, err_sm, *rec]
+
 
     def _interpolate(self, x: Tensor, scale_factor: float):
         if x.ndim == 5:

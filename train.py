@@ -123,7 +123,7 @@ from dataset.augmentation import (
 )
 from model import MattingNetwork
 from train_config import DATA_PATHS
-from train_loss import matting_loss, segmentation_loss
+from train_loss import matting_loss_lg, matting_loss_sm, segmentation_loss
 import kornia
 from torchvision import transforms as T
 
@@ -155,7 +155,7 @@ class Trainer:
         parser.add_argument('--seq-length-lr', type=int, required=True)
         parser.add_argument('--seq-length-hr', type=int, default=6)
         parser.add_argument('--downsample-ratio', type=float, default=0.25)
-        parser.add_argument('--batch-size-per-gpu', type=int, default=2)
+        parser.add_argument('--batch-size-per-gpu', type=int, default=4)
         parser.add_argument('--num-workers', type=int, default=8)
         parser.add_argument('--epoch-start', type=int, default=0)
         parser.add_argument('--epoch-end', type=int, default=16)
@@ -193,6 +193,7 @@ class Trainer:
         if self.args.dataset == 'videomatte':
             self.dataset_lr_train = VideoMatteDataset(
                 videomatte_dir=DATA_PATHS['videomatte']['train'],
+                background_image_dir=DATA_PATHS['background_images']['train'],
                 background_video_dir=DATA_PATHS['background_videos']['train'],
                 size=self.args.resolution_lr,
                 seq_length=self.args.seq_length_lr,
@@ -201,6 +202,7 @@ class Trainer:
             if self.args.train_hr:
                 self.dataset_hr_train = VideoMatteDataset(
                     videomatte_dir=DATA_PATHS['videomatte']['train'],
+                    background_image_dir=DATA_PATHS['background_images']['train'],
                     background_video_dir=DATA_PATHS['background_videos']['train'],
                     size=self.args.resolution_hr,
                     seq_length=self.args.seq_length_hr,
@@ -208,6 +210,7 @@ class Trainer:
                     transform=VideoMatteTrainAugmentation(size_hr))
             self.dataset_valid = VideoMatteDataset(
                 videomatte_dir=DATA_PATHS['videomatte']['valid'],
+                background_image_dir=DATA_PATHS['background_images']['valid'],
                 background_video_dir=DATA_PATHS['background_videos']['valid'],
                 size=self.args.resolution_hr if self.args.train_hr else self.args.resolution_lr,
                 seq_length=self.args.seq_length_hr if self.args.train_hr else self.args.seq_length_lr,
@@ -244,6 +247,8 @@ class Trainer:
             num_workers=self.args.num_workers,
             pin_memory=True)
         
+        self.len_train_dataloader = len(self.dataloader_lr_train)
+
     def init_model(self):
         self.log('Initializing model')
         self.model = MattingNetwork(self.args.model_variant, pretrained_backbone=True).to(self.rank)
@@ -275,8 +280,9 @@ class Trainer:
             self.epoch = epoch
             self.step = epoch * len(self.dataloader_lr_train)
             
+            tag = 'hr' if self.args.train_hr else 'lr'
             if not self.args.disable_validation:
-                self.validate()
+                self.validate(tag = tag)
             
             self.log(f'Training epoch: {epoch}')
             for true_fgr, true_pha, true_bgr in tqdm(self.dataloader_lr_train, disable=self.args.disable_progress_bar, dynamic_ncols=True):
@@ -337,45 +343,62 @@ class Trainer:
         fg_bg_input = torch.cat((true_src, true_bgr), dim = -3)
 
         with autocast(enabled=not self.args.disable_mixed_precision):
-            pred_pha_sm, pred_fgr_sm, pred_err_sm, pred_pha_lg, pred_fgr_lg = self.model_ddp(fg_bg_input, downsample_ratio=downsample_ratio)[:5]
 
             if tag == 'lr':
-                loss_hr = dict()
-                loss_hr['total'] = 0.0
-                loss_lr = matting_loss(pred_fgr_sm, pred_pha_sm, true_fgr, true_pha, pred_err_sm)
+                pred_pha_sm, pred_fgr_sm, pred_err_sm, *rec = self.model_ddp(fg_bg_input, downsample_ratio=downsample_ratio)
+                loss_lr = matting_loss_sm(pred_fgr_sm, pred_pha_sm, true_fgr, true_pha, pred_err_sm)
             else:
+                pred_pha_sm, pred_fgr_sm, pred_err_sm, pred_pha_lg, pred_fgr_lg, *rec = self.model_ddp(fg_bg_input, downsample_ratio=downsample_ratio)
+                
                 true_fgr_sm = kornia.geometry.transform.resize(true_fgr, pred_fgr_sm.shape[3:])
                 true_pha_sm = kornia.geometry.transform.resize(true_pha, pred_pha_sm.shape[3:])
 
-                loss_lr = matting_loss(pred_fgr_sm, pred_pha_sm, true_fgr_sm, true_pha_sm, pred_err_sm)             
-                loss_hr = matting_loss(pred_fgr_lg, pred_pha_lg, true_fgr, true_pha)
+                loss_lr = matting_loss_sm(pred_fgr_sm, pred_pha_sm, true_fgr_sm, true_pha_sm, pred_err_sm)             
+                loss_hr = matting_loss_lg(pred_fgr_lg, pred_pha_lg, true_fgr, true_pha)
         
-        self.scaler.scale(loss_lr['total'] + loss_hr['total']).backward()
+        if tag == 'lr':
+            self.scaler.scale(loss_lr['total']).backward()
+        else:
+            self.scaler.scale(loss_lr['total'] + loss_hr['total']).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()
         
         if self.rank == 0 and self.step % self.args.log_train_loss_interval == 0:
-            
-            for loss_name, loss_value in loss_lr.items():
-                self.writer.add_scalar(f'train_{tag}_{loss_name}', loss_value, self.step)
+            if tag == 'lr':
+                for loss_name, loss_value in loss_lr.items():
+                    self.writer.add_scalar(f'train_lr_{loss_name}', loss_value, self.step)
             if tag == 'hr':
+                for loss_name, loss_value in loss_lr.items():
+                    self.writer.add_scalar(f'train_hr_lr_{loss_name}', loss_value, self.step)
                 for loss_name, loss_value in loss_hr.items():
                     self.writer.add_scalar(f'train_{tag}_{loss_name}', loss_value, self.step)
-                    self.writer.add_scalar('total loss lr + hr', loss_lr['total'] + loss_hr['total'], self.step)
-        if tag == 'lr':
-            pred_pha = pred_pha_sm
-            pred_fgr = pred_fgr_sm
-        else:
-            pred_pha = pred_pha_lg
-            pred_fgr = pred_fgr_lg    
+                    self.writer.add_scalar('total_loss_lr_hr', loss_lr['total'] + loss_hr['total'], self.step)
+          
         if self.rank == 0 and self.step % self.args.log_train_images_interval == 0:
-            self.writer.add_image(f'train_{tag}_pred_fgr', make_grid(pred_fgr.flatten(0, 1), nrow=pred_fgr.size(1)), self.step)
-            self.writer.add_image(f'train_{tag}_pred_pha', make_grid(pred_pha.flatten(0, 1), nrow=pred_pha.size(1)), self.step)
-            self.writer.add_image(f'train_{tag}_true_fgr', make_grid(true_fgr.flatten(0, 1), nrow=true_fgr.size(1)), self.step)
-            self.writer.add_image(f'train_{tag}_true_pha', make_grid(true_pha.flatten(0, 1), nrow=true_pha.size(1)), self.step)
-            self.writer.add_image(f'train_{tag}_true_src', make_grid(true_src.flatten(0, 1), nrow=true_src.size(1)), self.step)
-    
+            if tag == 'lr':    
+                self.writer.add_image(f'train_{tag}_pred_err', make_grid(pred_err_sm.flatten(0, 1), nrow=pred_err_sm.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_pred_fgr', make_grid(pred_fgr_sm.flatten(0, 1), nrow=pred_fgr_sm.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_pred_pha', make_grid(pred_pha_sm.flatten(0, 1), nrow=pred_pha_sm.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_true_fgr', make_grid(true_fgr.flatten(0, 1), nrow=true_fgr.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_true_pha', make_grid(true_pha.flatten(0, 1), nrow=true_pha.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_true_src', make_grid(true_src.flatten(0, 1), nrow=true_src.size(1)), self.step)
+
+                del true_pha, true_fgr, true_src, true_bgr
+                del pred_pha_sm, pred_fgr_sm, pred_err_sm
+            if tag == 'hr':
+                self.writer.add_image(f'train_{tag}_lr_pred_err', make_grid(pred_err_sm.flatten(0, 1), nrow=pred_err_sm.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_lr_pred_fgr', make_grid(pred_fgr_sm.flatten(0, 1), nrow=pred_fgr_sm.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_lr_pred_pha', make_grid(pred_pha_sm.flatten(0, 1), nrow=pred_pha_sm.size(1)), self.step)
+
+                self.writer.add_image(f'train_{tag}_pred_fgr', make_grid(pred_fgr_lg.flatten(0, 1), nrow=pred_fgr_lg.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_pred_pha', make_grid(pred_pha_lg.flatten(0, 1), nrow=pred_pha_lg.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_true_fgr', make_grid(true_fgr.flatten(0, 1), nrow=true_fgr.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_true_pha', make_grid(true_pha.flatten(0, 1), nrow=true_pha.size(1)), self.step)
+                self.writer.add_image(f'train_{tag}_true_src', make_grid(true_src.flatten(0, 1), nrow=true_src.size(1)), self.step)
+
+                del true_pha, true_fgr, true_src, true_bgr
+                del pred_pha_sm, pred_fgr_sm, pred_err_sm, pred_pha_lg, pred_fgr_lg
     
     def load_next_mat_hr_sample(self):
         try:
@@ -387,9 +410,9 @@ class Trainer:
         return sample
     
     
-    def validate(self):
+    def validate(self, tag):
         if self.rank == 0:
-            self.log(f'Validating at the start of epoch: {self.epoch}')
+            self.log(f'Validating {tag} samples at the start of epoch: {self.epoch}')
             self.model_ddp.eval()
             total_loss, total_count = 0, 0
             with torch.no_grad():
@@ -402,8 +425,13 @@ class Trainer:
                         batch_size = true_src.size(0)
 
                         fg_bg_input = torch.cat((true_src, true_bgr), dim = -3)
-                        pred_fgr, pred_pha, pred_err = self.model(fg_bg_input)[:3]
-                        total_loss += matting_loss(pred_fgr, pred_pha, pred_err, true_fgr, true_pha)['total'].item() * batch_size
+
+                        if tag == 'lr':
+                            pred_fgr, pred_pha, pred_err, *rec = self.model(fg_bg_input)
+                            total_loss += matting_loss_sm(pred_fgr, pred_pha, true_fgr, true_pha, pred_err)['total'].item() * batch_size
+                        if tag == 'hr':
+                            pred_fgr, pred_pha, pred_err, pred_fgr_lg, pred_pha_lg, *rec = self.model(fg_bg_input, downsample_ratio = 0.25)
+                            total_loss += matting_loss_lg(pred_fgr_lg, pred_pha_lg, true_fgr, true_pha)['total'].item() * batch_size
                         total_count += batch_size
             avg_loss = total_loss / total_count
             self.log(f'Validation set average loss: {avg_loss}')
